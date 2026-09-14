@@ -1,0 +1,26 @@
+version: '2'
+
+run:
+  timeout: 5m
+  tests: true
+  build-tags:
+    - integration
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  exclusions:
+    paths:
+      - third_party
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    paths:
+      - third_party

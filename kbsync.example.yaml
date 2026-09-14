@@ -1,0 +1,41 @@
+source:
+  dsn: "host=127.0.0.1 port=54321 user=system password=source_password dbname=source_db sslmode=disable client_encoding=UTF-8"
+  max_open_conns: 2
+  conn_max_lifetime: "30m"
+
+target:
+  dsn: "host=127.0.0.1 port=54322 user=system password=target_password dbname=target_db sslmode=disable client_encoding=UTF-8"
+  max_open_conns: 2
+  conn_max_lifetime: "30m"
+
+batch_size: 1000
+# 同时同步的表数；源库、目标库连接池至少应略大于该值。
+table_parallelism: 2
+# 兼容参数化 upsert 路径的参数上限；当前默认暂存表 COPY 路径不受此项限制。
+max_parameters: 30000
+# 无主键增量每个事务合并处理的不同游标值数量。
+no_key_cursor_batch: 50
+# 每多少个已提交增量批次持久化一次断点；命令退出前仍会强制持久化。
+checkpoint_every_batches: 10
+# 可选：输出 Prometheus textfile 指标，供 node_exporter textfile collector 采集。
+metrics_file: "kbsync.prom"
+state_file: ".kbsync-state.json"
+# truncate: 事务内 TRUNCATE 后全量写入；delete: DELETE；append: 不清理。
+full_strategy: truncate
+
+tables:
+  - source: public.users
+    target: public.users
+    # 增量模式必填。应在该列上建索引，并保证修改时值单调增加。
+    cursor: updated_at
+    # 可省略；省略时读取源表主键。目标表必须有对应唯一/主键约束。
+    key_columns: [id]
+  - source: business.orders
+    target: archive.orders
+    cursor: modified_at
+    # 复合主键/逻辑唯一键按实际列顺序配置。
+    key_columns: [tenant_id, order_id]
+  - source: public.events
+    target: archive.events
+    cursor: event_time
+    # 无主键且不配置 key_columns 时，增量按 event_time 整组替换。
