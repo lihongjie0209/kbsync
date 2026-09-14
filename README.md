@@ -65,6 +65,8 @@ sha256sum -c checksums.txt --ignore-missing
 - 全量同步默认同时处理 2 张互不依赖的表；外键依赖层级仍严格按父表在前、子表在后执行。缺失的二级索引会在 COPY 完成后创建。
 - `table_parallelism` 控制同一依赖层内并发同步的表数；存在外键时按拓扑层执行，父表完成后才开始子表。
 - `--log-format=json` 输出 JSON 日志；批次日志包含模式、表名、批次号、行数、读取/写入/提交/总耗时、吞吐率和断点。DSN、密码和行内容不会记录。
+- 交互式终端默认显示每个运行中表的百分比、行数、速度和 ETA，完成的表自动移除，并显示尚在排队的表数。`--progress=always` 可强制显示，`--progress=never` 可关闭；JSON 日志和重定向输出默认关闭动态进度条。
+- 百分比和 ETA 使用同步开始时的精确待处理行数，因此启用进度条会为每张表额外执行一次 `COUNT(*)`；追求最低源库扫描开销时可使用 `--progress=never`。
 - 配置 `metrics_file` 后写出 Prometheus textfile 指标，包括每表行数、批次数、错误数、耗时和吞吐率，可由 node_exporter textfile collector 采集。
 
 ```bash

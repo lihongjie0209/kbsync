@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,6 +84,8 @@ INSERT INTO public.orders VALUES
 		t.Fatalf("Open() error = %v", err)
 	}
 	t.Cleanup(func() { _ = runner.Close() })
+	progress := &recordingProgress{}
+	runner.SetProgressReporter(progress)
 
 	if err := runner.Full(ctx); err != nil {
 		t.Fatalf("Full() error = %v", err)
@@ -131,6 +134,81 @@ INSERT INTO public.orders VALUES (1, 11, 'new', '2026-09-14T04:00:00Z');`)
 		t.Fatalf("second Incremental() error = %v", err)
 	}
 	assertRowCount(t, ctx, targetDB, "mirror.users", 4)
+	progress.assertCompleted(t, 3, 9)
+}
+
+type recordingProgress struct {
+	mu       sync.Mutex
+	begins   []int
+	finishes int
+	bars     []*recordingTableProgress
+}
+
+func (p *recordingProgress) Begin(tableCount int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.begins = append(p.begins, tableCount)
+}
+
+func (p *recordingProgress) Start(source, target string, totalRows int64) TableProgress {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	bar := &recordingTableProgress{source: source, target: target, total: totalRows}
+	p.bars = append(p.bars, bar)
+	return bar
+}
+
+func (p *recordingProgress) Finish() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.finishes++
+}
+
+func (p *recordingProgress) assertCompleted(t *testing.T, runs, bars int) {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.begins) != runs || p.finishes != runs {
+		t.Fatalf("progress runs = begins:%v finishes:%d, want %d", p.begins, p.finishes, runs)
+	}
+	if len(p.bars) != bars {
+		t.Fatalf("progress bars = %d, want %d", len(p.bars), bars)
+	}
+	for _, bar := range p.bars {
+		bar.mu.Lock()
+		if !bar.completed || bar.aborted || bar.current > bar.total {
+			t.Errorf("progress bar %s->%s = current:%d total:%d completed:%v aborted:%v", bar.source, bar.target, bar.current, bar.total, bar.completed, bar.aborted)
+		}
+		bar.mu.Unlock()
+	}
+}
+
+type recordingTableProgress struct {
+	mu        sync.Mutex
+	source    string
+	target    string
+	total     int64
+	current   int64
+	completed bool
+	aborted   bool
+}
+
+func (p *recordingTableProgress) Add(rows int64, _ time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.current += rows
+}
+
+func (p *recordingTableProgress) Complete() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.completed = true
+}
+
+func (p *recordingTableProgress) Abort() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.aborted = true
 }
 
 func startDatabaseContainer(t testing.TB, ctx context.Context) databaseContainer {

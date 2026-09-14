@@ -2,11 +2,14 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"kbsync/internal/config"
+	"kbsync/internal/progressui"
 	"kbsync/internal/syncer"
 )
 
@@ -18,6 +21,7 @@ type options struct {
 	targetDSN  string
 	logFormat  string
 	logLevel   string
+	progress   string
 }
 
 func New() *cobra.Command {
@@ -33,6 +37,7 @@ func New() *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.targetDSN, "target-dsn", "", "覆盖目标库 DSN（也可用 KBSYNC_TARGET_DSN）")
 	root.PersistentFlags().StringVar(&opts.logFormat, "log-format", "text", "日志格式：text 或 json")
 	root.PersistentFlags().StringVar(&opts.logLevel, "log-level", "info", "日志级别：debug、info、warn 或 error")
+	root.PersistentFlags().StringVar(&opts.progress, "progress", "auto", "进度条：auto、always 或 never")
 
 	root.AddCommand(newSyncCommand("full", "执行单次全量结构及数据同步", false, &opts))
 	root.AddCommand(newSyncCommand("incremental", "从断点执行一次增量结构及数据同步", true, &opts))
@@ -86,6 +91,17 @@ func run(cmd *cobra.Command, opts *options, action func(*syncer.Syncer) error) (
 	if err != nil {
 		return err
 	}
+	progressEnabled, progressForced, err := progressMode(opts.progress, opts.logFormat, cmd.ErrOrStderr())
+	if err != nil {
+		return err
+	}
+	logOutput := cmd.ErrOrStderr()
+	var reporter *progressui.Reporter
+	if progressEnabled {
+		reporter = progressui.New(cmd.ErrOrStderr(), progressForced)
+		defer reporter.Finish()
+		logOutput = reporter.LogWriter()
+	}
 	level := slog.LevelInfo
 	if err := level.UnmarshalText([]byte(strings.ToUpper(opts.logLevel))); err != nil {
 		return fmt.Errorf("无效 log-level %q: %w", opts.logLevel, err)
@@ -94,9 +110,9 @@ func run(cmd *cobra.Command, opts *options, action func(*syncer.Syncer) error) (
 	var handler slog.Handler
 	switch opts.logFormat {
 	case "text":
-		handler = slog.NewTextHandler(cmd.ErrOrStderr(), handlerOptions)
+		handler = slog.NewTextHandler(logOutput, handlerOptions)
 	case "json":
-		handler = slog.NewJSONHandler(cmd.ErrOrStderr(), handlerOptions)
+		handler = slog.NewJSONHandler(logOutput, handlerOptions)
 	default:
 		return fmt.Errorf("log-format 只能是 text 或 json")
 	}
@@ -107,6 +123,9 @@ func run(cmd *cobra.Command, opts *options, action func(*syncer.Syncer) error) (
 	runner, err := syncer.Open(cmd.Context(), cfg, logger)
 	if err != nil {
 		return err
+	}
+	if reporter != nil {
+		runner.SetProgressReporter(reporter)
 	}
 	defer func() {
 		if closeErr := runner.Close(); closeErr != nil && returnErr == nil {
@@ -119,4 +138,31 @@ func run(cmd *cobra.Command, opts *options, action func(*syncer.Syncer) error) (
 		return actionErr
 	}
 	return metricsErr
+}
+
+func progressMode(mode, logFormat string, output io.Writer) (enabled, forced bool, err error) {
+	switch mode {
+	case "never":
+		return false, false, nil
+	case "always":
+		if logFormat == "json" {
+			return false, false, fmt.Errorf("--progress=always 不能与 --log-format=json 同时使用")
+		}
+		return true, true, nil
+	case "auto":
+		if logFormat != "text" {
+			return false, false, nil
+		}
+		file, ok := output.(*os.File)
+		if !ok {
+			return false, false, nil
+		}
+		info, statErr := file.Stat()
+		if statErr != nil {
+			return false, false, nil
+		}
+		return info.Mode()&os.ModeCharDevice != 0, false, nil
+	default:
+		return false, false, fmt.Errorf("progress 只能是 auto、always 或 never")
+	}
 }

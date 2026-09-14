@@ -52,6 +52,46 @@ func TestBuildIncrementalQuery(t *testing.T) {
 	}
 }
 
+func TestBuildCountQuery(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		order      []string
+		checkpoint []string
+		wantQuery  string
+		wantArgs   []any
+	}{
+		{
+			name:      "full",
+			wantQuery: `SELECT count(*) FROM "public"."users"`,
+		},
+		{
+			name:      "first incremental",
+			order:     []string{"updated_at", "id"},
+			wantQuery: `SELECT count(*) FROM "public"."users" WHERE "updated_at" IS NOT NULL`,
+		},
+		{
+			name:       "incremental checkpoint",
+			order:      []string{"updated_at", "tenant_id", "id"},
+			checkpoint: []string{"2026-09-14T01:00:00Z", "7", "42"},
+			wantQuery:  `SELECT count(*) FROM "public"."users" WHERE "updated_at" IS NOT NULL AND ("updated_at", "tenant_id", "id") > ($1, $2, $3)`,
+			wantArgs:   []any{"2026-09-14T01:00:00Z", "7", "42"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			query, args := buildCountQuery(tableName{Schema: "public", Name: "users"}, test.order, test.checkpoint)
+			if query != test.wantQuery {
+				t.Fatalf("query = %q, want %q", query, test.wantQuery)
+			}
+			if !reflect.DeepEqual(args, test.wantArgs) {
+				t.Fatalf("args = %#v, want %#v", args, test.wantArgs)
+			}
+		})
+	}
+}
+
 func TestBuildUpsertSQL(t *testing.T) {
 	t.Parallel()
 	got := buildUpsertSQL(

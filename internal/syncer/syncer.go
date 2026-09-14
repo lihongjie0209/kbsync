@@ -17,11 +17,12 @@ import (
 type Logger func(format string, args ...any)
 
 type Syncer struct {
-	source  *sql.DB
-	target  *sql.DB
-	config  config.Config
-	log     Logger
-	metrics metricSet
+	source   *sql.DB
+	target   *sql.DB
+	config   config.Config
+	log      Logger
+	metrics  metricSet
+	progress ProgressReporter
 }
 
 func Open(ctx context.Context, cfg config.Config, log Logger) (*Syncer, error) {
@@ -85,6 +86,10 @@ func (s *Syncer) Full(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if s.progress != nil {
+		s.progress.Begin(len(s.config.Tables))
+		defer s.progress.Finish()
+	}
 	prepared := make(map[string]preparedTable, len(s.config.Tables))
 	var preparedMu sync.Mutex
 	// Ensure every referenced target table exists before data cleanup/copy.
@@ -133,6 +138,15 @@ func (s *Syncer) Full(ctx context.Context) error {
 func (s *Syncer) fullPreparedTable(ctx context.Context, mapping config.Table, prepared preparedTable, clean bool) (returnErr error) {
 	startedAt := time.Now()
 	sourceTable, targetTable, columns := prepared.source, prepared.target, prepared.columns
+	var tableProgress TableProgress
+	if s.progress != nil {
+		totalRows, err := s.countRows(ctx, sourceTable, nil, nil)
+		if err != nil {
+			return fmt.Errorf("统计源表 %s 进度总数: %w", mapping.Source, err)
+		}
+		tableProgress = s.progress.Start(mapping.Source, mapping.Target, totalRows)
+		defer func() { finishTableProgress(tableProgress, returnErr) }()
+	}
 	query := "SELECT " + quoteList(columns) + " FROM " + sourceTable.SQL()
 	rows, err := s.source.QueryContext(ctx, query)
 	if err != nil {
@@ -172,6 +186,8 @@ func (s *Syncer) fullPreparedTable(ctx context.Context, mapping config.Table, pr
 	defer func() { returnErr = errorsJoin(returnErr, statement.Close()) }()
 
 	count := int64(0)
+	reported := int64(0)
+	progressStartedAt := time.Now()
 	values, pointers := scanBuffer(len(columns))
 	for rows.Next() {
 		if err := rows.Scan(pointers...); err != nil {
@@ -181,12 +197,20 @@ func (s *Syncer) fullPreparedTable(ctx context.Context, mapping config.Table, pr
 			return fmt.Errorf("写入目标表 %s 第 %d 行: %w", mapping.Target, count+1, err)
 		}
 		count++
+		if tableProgress != nil && count-reported >= 100 {
+			tableProgress.Add(count-reported, time.Since(progressStartedAt))
+			reported = count
+			progressStartedAt = time.Now()
+		}
 		if count%int64(s.config.BatchSize) == 0 {
 			s.log("全量同步 %s: 已读取 %d 行", mapping.Source, count)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("遍历源表 %s: %w", mapping.Source, err)
+	}
+	if tableProgress != nil && count > reported {
+		tableProgress.Add(count-reported, time.Since(progressStartedAt))
 	}
 	if _, err := statement.ExecContext(ctx); err != nil {
 		return fmt.Errorf("结束 COPY %s: %w", mapping.Target, err)
@@ -213,6 +237,10 @@ func (s *Syncer) Incremental(ctx context.Context) error {
 	levels, err := s.dependencyLevels(ctx)
 	if err != nil {
 		return err
+	}
+	if s.progress != nil {
+		s.progress.Begin(len(s.config.Tables))
+		defer s.progress.Finish()
 	}
 	prepared := make(map[string]preparedTable, len(s.config.Tables))
 	var preparedMu sync.Mutex
@@ -345,8 +373,17 @@ func (s *Syncer) incrementalPreparedTable(ctx context.Context, mapping config.Ta
 	if hasCheckpoint && len(checkpointValue.Values) != len(orderColumns) {
 		return fmt.Errorf("表 %s 的断点与当前 cursor/key_columns 不兼容，请删除该表断点后重试", mapping.Source)
 	}
+	var tableProgress TableProgress
+	if s.progress != nil {
+		totalRows, err := s.countRows(ctx, sourceTable, orderColumns, checkpointValue.Values)
+		if err != nil {
+			return fmt.Errorf("统计源表 %s 增量进度总数: %w", mapping.Source, err)
+		}
+		tableProgress = s.progress.Start(mapping.Source, mapping.Target, totalRows)
+		defer func() { finishTableProgress(tableProgress, returnErr) }()
+	}
 	if len(orderColumns) == 1 {
-		return s.incrementalTableWithoutKey(ctx, mapping, sourceTable, targetTable, columns, store, stateKey, checkpointValue)
+		return s.incrementalTableWithoutKey(ctx, mapping, sourceTable, targetTable, columns, store, stateKey, checkpointValue, tableProgress)
 	}
 
 	batchSize := s.config.BatchSize
@@ -403,6 +440,9 @@ func (s *Syncer) incrementalPreparedTable(ctx context.Context, mapping config.Ta
 			}
 		}
 		batchDuration := time.Since(batchStartedAt)
+		if tableProgress != nil {
+			tableProgress.Add(int64(len(batch)), batchDuration)
+		}
 		rate := float64(len(batch)) / batchDuration.Seconds()
 		s.log("增量批次 mode=incremental source=%s target=%s batch=%d rows=%d total_rows=%d read_ms=%d write_ms=%d commit_ms=%d total_ms=%d rows_per_second=%.2f checkpoint=%v", mapping.Source, mapping.Target, batchNumber, len(batch), total, readDuration.Milliseconds(), writeDuration.Milliseconds(), commitDuration.Milliseconds(), batchDuration.Milliseconds(), rate, last)
 		if len(batch) < batchSize {
@@ -424,12 +464,14 @@ func (s *Syncer) incrementalTableWithoutKey(
 	store *checkpointStore,
 	stateKey string,
 	checkpointValue checkpoint,
+	tableProgress TableProgress,
 ) error {
 	total := int64(0)
 	startedAt := time.Now()
 	groups := int64(0)
 	batchNumber := 0
 	for {
+		batchStartedAt := time.Now()
 		cursorValues, err := s.nextCursorValues(ctx, sourceTable, mapping.Cursor, checkpointValue.Values, s.config.NoKeyCursorBatch)
 		if err != nil {
 			return fmt.Errorf("读取无主键表 %s 的下一组游标: %w", mapping.Source, err)
@@ -458,6 +500,9 @@ func (s *Syncer) incrementalTableWithoutKey(
 		checkpointValue = checkpoint{Values: []string{checkpointString(cursorValues[len(cursorValues)-1])}}
 		total += count
 		groups += int64(len(cursorValues))
+		if tableProgress != nil {
+			tableProgress.Add(count, time.Since(batchStartedAt))
+		}
 		batchNumber++
 		store.update(stateKey, checkpointValue)
 		if batchNumber%checkpointEveryBatches(s.config.CheckpointBatches) == 0 {
@@ -498,6 +543,15 @@ func (s *Syncer) nextCursorValues(ctx context.Context, table tableName, cursor s
 		values = append(values, value)
 	}
 	return values, rows.Err()
+}
+
+func (s *Syncer) countRows(ctx context.Context, table tableName, orderColumns, checkpoint []string) (int64, error) {
+	query, args := buildCountQuery(table, orderColumns, checkpoint)
+	var count int64
+	if err := s.source.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *Syncer) replaceCursorGroups(
@@ -635,7 +689,7 @@ func rowsPerSecond(rows int64, duration time.Duration) float64 {
 
 func buildIncrementalQuery(table tableName, columns, orderColumns, checkpoint []string, limit int) (string, []any) {
 	query := "SELECT " + quoteList(columns) + " FROM " + table.SQL() + " WHERE " + quoteIdentifier(orderColumns[0]) + " IS NOT NULL"
-	args := make([]any, 0, len(checkpoint))
+	var args []any
 	if len(checkpoint) > 0 {
 		placeholders := make([]string, len(checkpoint))
 		for i, value := range checkpoint {
@@ -645,6 +699,24 @@ func buildIncrementalQuery(table tableName, columns, orderColumns, checkpoint []
 		query += " AND (" + quoteList(orderColumns) + ") > (" + strings.Join(placeholders, ", ") + ")"
 	}
 	query += " ORDER BY " + quoteList(orderColumns) + " LIMIT " + strconv.Itoa(limit)
+	return query, args
+}
+
+func buildCountQuery(table tableName, orderColumns, checkpoint []string) (string, []any) {
+	query := "SELECT count(*) FROM " + table.SQL()
+	if len(orderColumns) == 0 {
+		return query, nil
+	}
+	query += " WHERE " + quoteIdentifier(orderColumns[0]) + " IS NOT NULL"
+	var args []any
+	if len(checkpoint) > 0 {
+		values := make([]string, len(checkpoint))
+		for i, value := range checkpoint {
+			values[i] = "$" + strconv.Itoa(i+1)
+			args = append(args, value)
+		}
+		query += " AND (" + quoteList(orderColumns) + ") > (" + strings.Join(values, ", ") + ")"
+	}
 	return query, args
 }
 
