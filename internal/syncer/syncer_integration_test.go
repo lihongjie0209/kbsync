@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -140,14 +141,16 @@ INSERT INTO public.orders VALUES (1, 11, 'new', '2026-09-14T04:00:00Z');`)
 type recordingProgress struct {
 	mu       sync.Mutex
 	begins   []int
+	totals   []int64
 	finishes int
 	bars     []*recordingTableProgress
 }
 
-func (p *recordingProgress) Begin(tableCount int) {
+func (p *recordingProgress) Begin(tableCount int, totalRows int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.begins = append(p.begins, tableCount)
+	p.totals = append(p.totals, totalRows)
 }
 
 func (p *recordingProgress) Start(source, target string, totalRows int64) TableProgress {
@@ -170,6 +173,10 @@ func (p *recordingProgress) assertCompleted(t *testing.T, runs, bars int) {
 	defer p.mu.Unlock()
 	if len(p.begins) != runs || p.finishes != runs {
 		t.Fatalf("progress runs = begins:%v finishes:%d, want %d", p.begins, p.finishes, runs)
+	}
+	wantTotals := []int64{6, 9, 0}
+	if !slices.Equal(p.totals, wantTotals) {
+		t.Fatalf("progress total rows = %v, want %v", p.totals, wantTotals)
 	}
 	if len(p.bars) != bars {
 		t.Fatalf("progress bars = %d, want %d", len(p.bars), bars)

@@ -5,7 +5,7 @@ import "time"
 // ProgressReporter receives table lifecycle events. Implementations must be
 // safe for concurrent calls because independent tables may run in parallel.
 type ProgressReporter interface {
-	Begin(tableCount int)
+	Begin(tableCount int, totalRows int64)
 	Start(source, target string, totalRows int64) TableProgress
 	Finish()
 }

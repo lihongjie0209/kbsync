@@ -86,10 +86,6 @@ func (s *Syncer) Full(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if s.progress != nil {
-		s.progress.Begin(len(s.config.Tables))
-		defer s.progress.Finish()
-	}
 	prepared := make(map[string]preparedTable, len(s.config.Tables))
 	var preparedMu sync.Mutex
 	// Ensure every referenced target table exists before data cleanup/copy.
@@ -106,6 +102,14 @@ func (s *Syncer) Full(ctx context.Context) error {
 			return err
 		}
 	}
+	progressTotals, totalRows, err := s.fullProgressTotals(ctx, prepared)
+	if err != nil {
+		return err
+	}
+	if s.progress != nil {
+		s.progress.Begin(len(s.config.Tables), totalRows)
+		defer s.progress.Finish()
+	}
 	if err := s.cleanFullTargets(ctx, levels); err != nil {
 		return err
 	}
@@ -113,7 +117,7 @@ func (s *Syncer) Full(ctx context.Context) error {
 		if err := s.runMappings(ctx, level, func(ctx context.Context, mapping config.Table) error {
 			startedAt := time.Now()
 			item := prepared[mapping.Source+"->"+mapping.Target]
-			err := s.fullPreparedTable(ctx, mapping, item, false)
+			err := s.fullPreparedTable(ctx, mapping, item, false, progressTotals[tableMappingKey(mapping)])
 			if err != nil {
 				s.metrics.record("full", mapping.Source, mapping.Target, 0, 0, time.Since(startedAt), true)
 			}
@@ -135,15 +139,11 @@ func (s *Syncer) Full(ctx context.Context) error {
 	return nil
 }
 
-func (s *Syncer) fullPreparedTable(ctx context.Context, mapping config.Table, prepared preparedTable, clean bool) (returnErr error) {
+func (s *Syncer) fullPreparedTable(ctx context.Context, mapping config.Table, prepared preparedTable, clean bool, totalRows int64) (returnErr error) {
 	startedAt := time.Now()
 	sourceTable, targetTable, columns := prepared.source, prepared.target, prepared.columns
 	var tableProgress TableProgress
 	if s.progress != nil {
-		totalRows, err := s.countRows(ctx, sourceTable, nil, nil)
-		if err != nil {
-			return fmt.Errorf("统计源表 %s 进度总数: %w", mapping.Source, err)
-		}
 		tableProgress = s.progress.Start(mapping.Source, mapping.Target, totalRows)
 		defer func() { finishTableProgress(tableProgress, returnErr) }()
 	}
@@ -238,10 +238,6 @@ func (s *Syncer) Incremental(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if s.progress != nil {
-		s.progress.Begin(len(s.config.Tables))
-		defer s.progress.Finish()
-	}
 	prepared := make(map[string]preparedTable, len(s.config.Tables))
 	var preparedMu sync.Mutex
 	for _, level := range levels {
@@ -260,11 +256,19 @@ func (s *Syncer) Incremental(ctx context.Context) error {
 	if err := s.reconcileForeignKeys(ctx); err != nil {
 		return err
 	}
+	progressTotals, totalRows, err := s.incrementalProgressTotals(ctx, prepared, store)
+	if err != nil {
+		return err
+	}
+	if s.progress != nil {
+		s.progress.Begin(len(s.config.Tables), totalRows)
+		defer s.progress.Finish()
+	}
 	for _, level := range levels {
 		if err := s.runMappings(ctx, level, func(ctx context.Context, mapping config.Table) error {
 			startedAt := time.Now()
 			item := prepared[mapping.Source+"->"+mapping.Target]
-			err := s.incrementalPreparedTable(ctx, mapping, item, store)
+			err := s.incrementalPreparedTable(ctx, mapping, item, store, progressTotals[tableMappingKey(mapping)])
 			if err != nil {
 				s.metrics.record("incremental", mapping.Source, mapping.Target, 0, 0, time.Since(startedAt), true)
 			}
@@ -361,7 +365,7 @@ func (s *Syncer) runMappings(ctx context.Context, mappings []config.Table, actio
 	return firstErr
 }
 
-func (s *Syncer) incrementalPreparedTable(ctx context.Context, mapping config.Table, prepared preparedTable, store *checkpointStore) (returnErr error) {
+func (s *Syncer) incrementalPreparedTable(ctx context.Context, mapping config.Table, prepared preparedTable, store *checkpointStore, totalRows int64) (returnErr error) {
 	defer func() { returnErr = errorsJoin(returnErr, store.flush()) }()
 	sourceTable, targetTable, columns := prepared.source, prepared.target, prepared.columns
 	orderColumns, err := incrementalColumns(columns, prepared.primaryKey, mapping)
@@ -375,10 +379,6 @@ func (s *Syncer) incrementalPreparedTable(ctx context.Context, mapping config.Ta
 	}
 	var tableProgress TableProgress
 	if s.progress != nil {
-		totalRows, err := s.countRows(ctx, sourceTable, orderColumns, checkpointValue.Values)
-		if err != nil {
-			return fmt.Errorf("统计源表 %s 增量进度总数: %w", mapping.Source, err)
-		}
 		tableProgress = s.progress.Start(mapping.Source, mapping.Target, totalRows)
 		defer func() { finishTableProgress(tableProgress, returnErr) }()
 	}
@@ -552,6 +552,67 @@ func (s *Syncer) countRows(ctx context.Context, table tableName, orderColumns, c
 		return 0, err
 	}
 	return count, nil
+}
+
+func tableMappingKey(mapping config.Table) string {
+	return mapping.Source + "->" + mapping.Target
+}
+
+func (s *Syncer) fullProgressTotals(ctx context.Context, prepared map[string]preparedTable) (map[string]int64, int64, error) {
+	if s.progress == nil {
+		return nil, 0, nil
+	}
+	return s.collectProgressTotals(ctx, func(ctx context.Context, mapping config.Table) (int64, error) {
+		count, err := s.countRows(ctx, prepared[tableMappingKey(mapping)].source, nil, nil)
+		if err != nil {
+			return 0, fmt.Errorf("统计源表 %s 进度总数: %w", mapping.Source, err)
+		}
+		return count, nil
+	})
+}
+
+func (s *Syncer) incrementalProgressTotals(ctx context.Context, prepared map[string]preparedTable, store *checkpointStore) (map[string]int64, int64, error) {
+	if s.progress == nil {
+		return nil, 0, nil
+	}
+	return s.collectProgressTotals(ctx, func(ctx context.Context, mapping config.Table) (int64, error) {
+		item := prepared[tableMappingKey(mapping)]
+		orderColumns, err := incrementalColumns(item.columns, item.primaryKey, mapping)
+		if err != nil {
+			return 0, err
+		}
+		checkpointValue, hasCheckpoint := store.get(tableMappingKey(mapping))
+		if hasCheckpoint && len(checkpointValue.Values) != len(orderColumns) {
+			return 0, fmt.Errorf("表 %s 的断点与当前 cursor/key_columns 不兼容，请删除该表断点后重试", mapping.Source)
+		}
+		count, err := s.countRows(ctx, item.source, orderColumns, checkpointValue.Values)
+		if err != nil {
+			return 0, fmt.Errorf("统计源表 %s 增量进度总数: %w", mapping.Source, err)
+		}
+		return count, nil
+	})
+}
+
+func (s *Syncer) collectProgressTotals(ctx context.Context, count func(context.Context, config.Table) (int64, error)) (map[string]int64, int64, error) {
+	totals := make(map[string]int64, len(s.config.Tables))
+	var mu sync.Mutex
+	if err := s.runMappings(ctx, s.config.Tables, func(ctx context.Context, mapping config.Table) error {
+		rows, err := count(ctx, mapping)
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		totals[tableMappingKey(mapping)] = rows
+		mu.Unlock()
+		return nil
+	}); err != nil {
+		return nil, 0, err
+	}
+	var total int64
+	for _, rows := range totals {
+		total += rows
+	}
+	return totals, total, nil
 }
 
 func (s *Syncer) replaceCursorGroups(

@@ -13,7 +13,7 @@ func TestReporterLifecycle(t *testing.T) {
 	t.Parallel()
 	var output bytes.Buffer
 	reporter := New(&output, true)
-	reporter.Begin(2)
+	reporter.Begin(2, 15)
 	if _, err := reporter.LogWriter().Write([]byte("同步开始\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -28,6 +28,18 @@ func TestReporterLifecycle(t *testing.T) {
 
 	if got := reporter.queued.Load(); got != 0 {
 		t.Fatalf("queued = %d, want 0", got)
+	}
+	if got := reporter.totalRows.Load(); got != 15 {
+		t.Fatalf("totalRows = %d, want 15", got)
+	}
+	if got := reporter.completedRows.Load(); got != 12 {
+		t.Fatalf("completedRows = %d, want 12", got)
+	}
+	if got := reporter.completed.Load(); got != 1 {
+		t.Fatalf("completed tables = %d, want 1", got)
+	}
+	if got := reporter.failed.Load(); got != 1 {
+		t.Fatalf("failed tables = %d, want 1", got)
 	}
 	if got := first.current.Load(); got != 10 || !first.done.Load() {
 		t.Fatalf("first = {current:%d done:%v}, want {10 true}", got, first.done.Load())
@@ -44,7 +56,7 @@ func TestReporterConcurrentTables(t *testing.T) {
 	t.Parallel()
 	const tables = 20
 	reporter := New(io.Discard, true)
-	reporter.Begin(tables)
+	reporter.Begin(tables, tables*100)
 	var wg sync.WaitGroup
 	for table := range tables {
 		wg.Go(func() {
@@ -58,5 +70,14 @@ func TestReporterConcurrentTables(t *testing.T) {
 	reporter.Finish()
 	if got := reporter.queued.Load(); got != 0 {
 		t.Fatalf("queued = %d, want 0", got)
+	}
+	if got := reporter.totalRows.Load(); got != tables*100 {
+		t.Fatalf("totalRows = %d, want %d", got, tables*100)
+	}
+	if got := reporter.completedRows.Load(); got != tables*100 {
+		t.Fatalf("completedRows = %d, want %d", got, tables*100)
+	}
+	if got := reporter.completed.Load(); got != tables {
+		t.Fatalf("completed tables = %d, want %d", got, tables)
 	}
 }
