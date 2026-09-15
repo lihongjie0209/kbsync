@@ -6,6 +6,7 @@ package gokb
 import (
 	"fmt"
 	"net"
+	"runtime"
 	"syscall"
 	"time"
 )
@@ -23,9 +24,11 @@ func CreateDialer(timeout timeoutParams) net.Dialer {
 				if controlErr != nil {
 					return
 				}
-				controlErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 0x12, timeout.tcp_user_timeout)
-				if controlErr != nil {
-					return
+				if runtime.GOOS != "darwin" {
+					controlErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 0x12, timeout.tcp_user_timeout)
+					if controlErr != nil {
+						return
+					}
 				}
 			})
 			if err != nil {

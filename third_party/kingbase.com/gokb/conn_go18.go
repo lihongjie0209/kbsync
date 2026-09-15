@@ -90,7 +90,7 @@ func IsValue(v interface{}) bool {
 var valuerReflectType = reflect.TypeOf((*driver.Valuer)(nil)).Elem()
 
 func callValuerValue(vr driver.Valuer) (v driver.Value, err error) {
-	if rv := reflect.ValueOf(vr); rv.Kind() == reflect.Pointer &&
+	if rv := reflect.ValueOf(vr); rv.Kind() == reflect.Ptr &&
 		rv.IsNil() &&
 		rv.Type().Elem().Implements(valuerReflectType) {
 		return nil, nil
@@ -152,7 +152,7 @@ func (c converter) ConvertValue(v interface{}) (driver.Value, error) {
 	//其它in类型参数
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
-	case reflect.Pointer:
+	case reflect.Ptr:
 		// indirect pointers
 		if rv.IsNil() {
 			return nil, nil

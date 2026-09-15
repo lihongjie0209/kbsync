@@ -1276,22 +1276,39 @@ func (cn *conn) simpleExec(q string) (res driver.Result, commandTag string, err 
 					cn.bad = true
 					errorf("unexpected DataRow after error %s", err)
 				}
-				//第一列必须为oid.T_int4
-				switch row.colTyps[0].OID {
-				case cn.allOid.T_int4:
-					//获取第一列自增列id
-					l := r.int32()
-					if -1 == l {
-						dest = 0
-						continue
-					}
-					dest = decode(&cn.parameterStatus, r.next(l), row.colTyps[0].OID, row.colFmts[0], *cn)
-					if !alreadyGet {
+				l := r.int32()
+				if -1 == l {
+					dest = 0
+					continue
+				}
+				//可以指定auto_increment的类型：tinyint、int2、int4、uint4、int8、uint8、float4、float8、mediumint、middleint、unsignedsmallint、unsignedmediumint
+				//截止20251205-Main_MySQLMode_Dev，域类型-基类型：bigint为int8；mediumint、middleint、unsignedsmallint、unsignedmediumint均为int4
+				dest = decode(&cn.parameterStatus, r.next(l), row.colTyps[0].OID, row.colFmts[0], *cn)
+				if !alreadyGet {
+					switch row.colTyps[0].OID {
+					case cn.allOid.T_tinyint:
+						if cn.databaseMode == "sqlserver" {
+							lastID = int64(dest.(uint8))
+						} else {
+							lastID = int64(dest.(int8))
+						}
+						alreadyGet = true
+					case cn.allOid.T_int2, cn.allOid.T_int4, cn.allOid.T_int8, cn.allOid.T_bigint:
 						lastID = dest.(int64)
 						alreadyGet = true
+					case cn.allOid.T_uint4:
+						lastID = int64(dest.(uint32))
+						alreadyGet = true
+					case cn.allOid.T_uint8:
+						lastID = int64(dest.(uint64))
+						alreadyGet = true
+					case cn.allOid.T_float4, cn.allOid.T_float8:
+						lastID = int64(dest.(float64))
+						alreadyGet = true
+					default:
+						//对于其它类型不应报错，保持自增值为0即可
+						//errorf("the first column(oid:%d) is not auto_increment id", row.colTyps[0].OID)
 					}
-				default:
-					//errorf("the first column(oid:%d) is not auto_increment id", row.colTyps[0].OID)
 				}
 				continue
 			}
@@ -2631,21 +2648,21 @@ func (cn conn) ParseOutValues(rb *readBuf, bindParams []driver.Value, colTyps []
 			case cn.allOid.T_timestamp, cn.allOid.T_timestamptz, cn.allOid.T_datetime:
 				switch dest.(type) {
 				case *time.Time:
-					*dest.(*time.Time) = (parseTs(nil, string(byteValues[outNum]))).(time.Time)
+					*dest.(*time.Time) = (parseTs(cn.parameterStatus.currentLocation, string(byteValues[outNum]))).(time.Time)
 				case *DateTime1:
-					*dest.(*DateTime1) = DateTime1((parseTs(nil, string(byteValues[outNum]))).(time.Time))
+					*dest.(*DateTime1) = DateTime1((parseTs(cn.parameterStatus.currentLocation, string(byteValues[outNum]))).(time.Time))
 				}
 			case cn.allOid.T_time, cn.allOid.T_timetz:
 				switch dest.(type) {
 				case *time.Time:
-					*dest.(*time.Time) = (parseTime(nil, string(byteValues[outNum]))).(time.Time)
+					*dest.(*time.Time) = (parseTime(cn.parameterStatus.currentLocation, string(byteValues[outNum]))).(time.Time)
 				case *civil.Time:
 					*dest.(*civil.Time) = (parseCivilTime(string(byteValues[outNum]))).(civil.Time)
 				}
 			case cn.allOid.T_date:
 				switch dest.(type) {
 				case *time.Time:
-					*dest.(*time.Time) = (parseDate(nil, string(byteValues[outNum]))).(time.Time)
+					*dest.(*time.Time) = (parseDate(cn.parameterStatus.currentLocation, string(byteValues[outNum]))).(time.Time)
 				case *civil.Date:
 					*dest.(*civil.Date) = (parseCivilDate(string(byteValues[outNum]))).(civil.Date)
 				}
@@ -3170,22 +3187,39 @@ func (cn *conn) readExecuteResponse(protocolState string, v []driver.Value, colT
 					cn.bad = true
 					errorf("unexpected DataRow after error %s", err)
 				}
-				//第一列必须为oid.T_int4
-				switch colTyps[0].OID {
-				case cn.allOid.T_int4:
-					//获取第一列自增列id
-					l := r.int32()
-					if -1 == l {
-						dest = 0
-						continue
-					}
-					dest = decode(&cn.parameterStatus, r.next(l), colTyps[0].OID, colFmts[0], *cn)
-					if !alreadyGet {
+				l := r.int32()
+				if -1 == l {
+					dest = 0
+					continue
+				}
+				//可以指定auto_increment的类型：tinyint、int2、int4、uint4、int8、uint8、float4、float8、mediumint、middleint、unsignedsmallint、unsignedmediumint
+				//截止20251205-Main_MySQLMode_Dev，域类型-基类型：bigint为int8；mediumint、middleint、unsignedsmallint、unsignedmediumint均为int4
+				dest = decode(&cn.parameterStatus, r.next(l), colTyps[0].OID, colFmts[0], *cn)
+				if !alreadyGet {
+					switch colTyps[0].OID {
+					case cn.allOid.T_tinyint:
+						if cn.databaseMode == "sqlserver" {
+							lastID = int64(dest.(uint8))
+						} else {
+							lastID = int64(dest.(int8))
+						}
+						alreadyGet = true
+					case cn.allOid.T_int2, cn.allOid.T_int4, cn.allOid.T_int8, cn.allOid.T_bigint:
 						lastID = dest.(int64)
 						alreadyGet = true
+					case cn.allOid.T_uint4:
+						lastID = int64(dest.(uint32))
+						alreadyGet = true
+					case cn.allOid.T_uint8:
+						lastID = int64(dest.(uint64))
+						alreadyGet = true
+					case cn.allOid.T_float4, cn.allOid.T_float8:
+						lastID = int64(dest.(float64))
+						alreadyGet = true
+					default:
+						//对于其它类型不应报错，保持自增值为0即可
+						//errorf("the first column(oid:%d) is not auto_increment id", colTyps[0].OID)
 					}
-				default:
-					//errorf("the first column(oid:%d) is not auto_increment id", colTyps[0].OID)
 				}
 				continue
 			}

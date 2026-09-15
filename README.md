@@ -1,6 +1,6 @@
 # kbsync
 
-`kbsync` 是 KingbaseES → KingbaseES 的 Go 命令行同步工具，使用随项目附带的官方 `kingbase.com/gokb` 驱动。
+`kbsync` 是 KingbaseES → KingbaseES 的 Go 命令行同步工具，使用随项目附带的官方 `kingbase.com/gokb` 驱动（V009R003C018）。
 
 ## 能力
 
@@ -22,7 +22,7 @@ make build
 ./bin/kbsync --help
 ```
 
-驱动源码位于 `third_party/kingbase.com/gokb`，`go.mod` 通过 `replace` 使用它，不依赖私有模块仓库。
+驱动源码位于 `third_party/kingbase.com/gokb`，来源为官方 `KingbaseES_V009R003C018B0003_GOLANG` 分发包；项目补充了模块依赖声明及 Linux/macOS/Windows 构建适配。根 `go.mod` 通过 `replace` 使用它，不依赖私有模块仓库。
 
 也可以从 GitHub Releases 下载 Linux、Windows 或 macOS 的 amd64/arm64 归档，并使用同一 Release 中的 `checksums.txt` 校验 SHA-256。推送 `v*` 标签时由 GoReleaser 自动构建发布：
 
